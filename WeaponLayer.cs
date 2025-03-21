@@ -1,7 +1,10 @@
 ﻿using app.savedata;
+using ImGuiNET;
 using REFrameworkNET;
 using REFrameworkNET.Attributes;
+using REFrameworkNET.Callbacks;
 using System;
+using System.Collections.Generic;
 
 using EquipGui = app.GUI080001;
 using SubmenuGui = app.GUI000007;
@@ -13,6 +16,11 @@ public static class Extension
     public static T? Cast<T>(this _System.Object obj) where T : class
     {
         return (obj as IObject)?.As<T>();
+    }
+
+    public static ulong Addr(this _System.Object obj)
+    {
+        return (obj as IObject)?.GetAddress() ?? 0;
     }
 }
 public class WeaponLayer
@@ -67,13 +75,31 @@ public class WeaponLayer
             _ => null,
         };
         if (weaponList is null) return null;
+
         for (var i = 0; i < weaponList._Values.Count; ++i)
         {
-
             var weapon = weaponList._Values[i].Cast<app.user_data.WeaponData.cData>();
-            if (weapon?._ModelId == modelId) return weapon._Index;
+            if (weapon is null) continue;
+            if (weapon._ModelId == modelId) return weapon._Index;
         }
+
+        if (app.ArtianUtil.getModelId(wpType, 0) == modelId)
+            return app.ArtianUtil.getArtianWeaponData(wpType, app.ItemDef.RARE.RARE5)?._Index;
+        if (app.ArtianUtil.getModelId(wpType, 2) == modelId)
+            return app.ArtianUtil.getArtianWeaponData(wpType, app.ItemDef.RARE.RARE6)?._Index;
+        if (app.ArtianUtil.getModelId(wpType, 5) == modelId)
+            return app.ArtianUtil.getArtianWeaponData(wpType, app.ItemDef.RARE.RARE7)?._Index;
         return null;
+    }
+
+    static Dictionary<int, int?> reverseModelIdCache = new Dictionary<int, int?>();
+    static int? GetCachedWeaponIdForModel(int modelId, app.WeaponDef.TYPE wpType)
+    {
+        if (reverseModelIdCache.ContainsKey(modelId))
+            return reverseModelIdCache[modelId];
+        var wpId = GetWeaponIdForModel(modelId, wpType);
+        reverseModelIdCache[modelId] = wpId;
+        return wpId;
     }
 
     static app.net_packet.cPlCreateInfo? infoPacket = null;
@@ -92,10 +118,10 @@ public class WeaponLayer
     {
         API.LogInfo($"mainwptype:{hunterInfo?._WpType}");
         var (_, weaponWork) = currentWeapon(WeaponSlot.Main);
-        var mainId = GetWeaponIdForModel(toModelId(weaponWork.FreeVal5), app.WeaponUtil.getCurrentWeaponType(-1));
+        var mainId = GetCachedWeaponIdForModel(toModelId(weaponWork.FreeVal5), app.WeaponUtil.getCurrentWeaponType(-1));
 
         var (_, rWeaponWork) = currentWeapon(WeaponSlot.Reserve);
-        var reserveId = GetWeaponIdForModel(toModelId(rWeaponWork.FreeVal5), app.WeaponUtil.getCurrentReserveWeaponType());
+        var reserveId = GetCachedWeaponIdForModel(toModelId(rWeaponWork.FreeVal5), app.WeaponUtil.getCurrentReserveWeaponType());
 
 
         if (mainId is not null) infoPacket!.WeaponID = (int)mainId;
@@ -168,12 +194,20 @@ public class WeaponLayer
         if (gui is null) return PreHookResult.Continue;
         var selectedWeaponType = gui._CurrentWeaponType;
         var currentWeaponType = app.WeaponUtil.getCurrentWeaponType(-1);
-        if (selectedWeaponType != currentWeaponType)
+        weaponModel = null;
+        submenuOverride = false;
+
+        if (selectedWeaponType != currentWeaponType) return PreHookResult.Continue;
+
+        var (_, current) = currentWeapon(WeaponSlot.Main);
+        if (gui._CurrentEquipSet.WorkInfo.Work == current)
         {
-            weaponModel = null;
-            submenuOverride = false;
+            if (current.FreeVal5 == 0) return PreHookResult.Continue;
+            submenuOverride = true;
+            weaponModel = -1;
             return PreHookResult.Continue;
         }
+
         var modelId = gui._EquipPreviewParts._CurrentModelId;
         weaponModel = modelId;
         submenuOverride = true;
@@ -186,7 +220,10 @@ public class WeaponLayer
         if (!submenuOverride) return PreHookResult.Continue;
         var guid = _System.Guid.NewGuid();
         var menu_info = ManagedObject.FromAddress(args[3]).As<app.cGUISubMenuInfo>();
-        menu_info.addItem("Layer on equipped weapon", guid, guid, true, false, null);
+        var menu_name = weaponModel >= 0
+            ? "Layer on equipped weapon"
+            : "Reset Layer";
+        menu_info.addItem(menu_name, guid, guid, true, false, null);
         return PreHookResult.Continue;
     }
 
@@ -213,6 +250,32 @@ public class WeaponLayer
     {
         submenuOverride = false;
         return PreHookResult.Continue;
+    }
+
+
+    [Callback(typeof(ImGuiDrawUI), CallbackType.Pre)]
+    static void ImguiDraw()
+    {
+        if (!ImGui.TreeNode("Weapon Layering")) return;
+        var (_, weapon) = currentWeapon(WeaponSlot.Main);
+        var weaponData = app.WeaponUtil.getWeaponData(weapon);
+        ImGui.Text($"current weapon:");
+        ImGui.Text($"modelId:{weaponData._ModelId}:{weaponData._CustomModelId}");
+        ImGui.Text($"freeVal5:{weapon.FreeVal5} (as model: {toModelId(weapon.FreeVal5)})");
+        var reverseWeaponId = GetWeaponIdForModel(toModelId(weapon.FreeVal5), app.WeaponUtil.getCurrentWeaponType(-1));
+        ImGui.Text($"reversed weapon Id: {reverseWeaponId}");
+
+        if (ImGui.TreeNode("Debug"))
+        {
+            var wpType = app.WeaponUtil.getCurrentWeaponType(-1);
+            var t6 = app.ArtianUtil.getArtianWeaponData(wpType, app.ItemDef.RARE.RARE5)?._Index;
+            var t7 = app.ArtianUtil.getArtianWeaponData(wpType, app.ItemDef.RARE.RARE6)?._Index;
+            var t8 = app.ArtianUtil.getArtianWeaponData(wpType, app.ItemDef.RARE.RARE7)?._Index;
+            ImGui.Text($"artian index {t6},{t7},{t8}");
+
+            ImGui.TreePop();
+        }
+        ImGui.TreePop();
     }
 
 }
